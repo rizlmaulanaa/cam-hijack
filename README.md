@@ -1,4 +1,4 @@
-# cam-hijack-lab — Authorized Browser Camera Demonstration Lab
+# cam-hijack-lab —  Browser Base Camera Hijacking
 
 [![Python](https://img.shields.io/badge/python-3.8+-blue?logo=python)](https://python.org)
 [![Security](https://img.shields.io/badge/use-authorized_only-orange)](#disclaimer)
